@@ -1,0 +1,88 @@
+ Building_extraction.ipynb
+
+!pip install rasterio
+!pip install numpy
+!pip install geopandas
+!pip install shapely
+!pip install skimage
+!pip install sklearn
+
+import os
+import rasterio
+import numpy as np
+import geopandas as gpd
+from shapely.geometry import Polygon
+import matplotlib.pyplot as plt
+from skimage.filters import threshold_otsu              #image segmentation
+from skimage.morphology import closing, square
+import cv2 # OpenCV for contour extraction
+
+# Input raster file and output shapefile paths
+input_raster_file = r"/content/bang_comp.tiff"
+output_shapefile_builtup = r"/content/builtup_out.shp"
+
+def open_and_read_raster(input_raster_file):
+    """Opens and reads the raster file, returning the image and its metadata."""
+    src = rasterio.open(input_raster_file)
+    img = src.read()  # Read all bands  ( bands, rows, cols)
+    img = np.transpose(img, (1, 2, 0))  # Rearrange to (rows, cols, bands)
+
+
+    crs = src.crs
+    transform = src.transform
+
+    return src, img, crs, transform
+
+def compute_ndbi(img, swir_band_index, nir_band_index):
+    """Compute NDBI index from the raster image."""
+    swir = img[:, :, swir_band_index].astype(float)    # : --> all rows, : --> all columns
+    nir = img[:, :, nir_band_index].astype(float)
+    ndbi = (swir - nir) / (swir + nir + 1e-10)  # Avoid division by zero
+    return ndbi
+
+def extract_builtup_regions(input_image_path, output_shapefile_path):
+    """Extracts builtup regions from the input raster file and saves as a shapefile."""
+    src, img, crs, transform = open_and_read_raster(input_image_path)
+    if src is None or crs is None:
+        print("Failed to load raster data.")
+        return
+
+    # Compute NDBI using appropriate band indices (adjust based on your raster data)
+    ndbi = compute_ndbi(img, swir_band_index=1, nir_band_index=0)  # Replace indices with actual NIR and Red bands
+
+    # Apply Otsu's threshold to segment NDVI values
+    threshold_value = threshold_otsu(ndbi)
+    builtup_mask = ndbi > threshold_value
+
+    # Perform morphological closing to clean up the mask
+    builtup_mask = closing(builtup_mask, square(3)).astype(np.uint8)  #3*3
+
+    # Find contours in the builtup mask
+    contours, _ = cv2.findContours(builtup_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Convert contours to polygons
+    polygons = []
+    for contour in contours:
+        contour = np.squeeze(contour)
+        if contour.ndim > 1 and contour.shape[0] > 2:
+            polygon = Polygon(contour)
+            if polygon.is_valid and polygon.area > 10:  # Filter small polygons
+                polygons.append(polygon)
+
+    # Create a GeoDataFrame and save polygons to a shapefile
+    data = {'geometry': polygons}
+    gdf = gpd.GeoDataFrame(data, crs=crs)
+    gdf.to_file(output_shapefile_path)
+
+    print(f"builtup region polygons saved to {output_shapefile_path}")
+
+    # Visualize the builtup mask and contours
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(builtup_mask, cmap="OrRd")
+    ax.set_title("Extracted builtup Regions")
+    # for polygon in polygons:
+    #   ax.plot(*polygon.exterior.xy, 'r-', linewidth=2)
+    plt.show()
+
+# Call the function to extract builtup regions and save to shapefile
+extract_builtup_regions(input_raster_file, output_shapefile_builtup)
